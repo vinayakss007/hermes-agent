@@ -4,7 +4,8 @@ Methodology (settled, binding): `docs/plans/opentui-bench-suite.md`. This
 directory is the implementation: real binaries over a real node-pty PTY
 (120×40, xterm-256color), a fake gateway substituted via `HERMES_PYTHON`
 (ZERO changes to either UI), external `/proc` sampling, cgroup-v2 memory caps.
-No tmux anywhere in measurement.
+No tmux anywhere in measurement — except the `pipeline` cell, whose entire
+point is measuring the tmux emulator leg (see its note below).
 
 ## Pieces
 
@@ -33,10 +34,12 @@ node run.mjs --cell cpu           # paced 30 ev/s streaming ×3
 node run.mjs --cell scroll        # SGR wheel 30Hz×15s on a 3000-msg transcript ×3
 node run.mjs --cell startup       # ×10, fake gateway
 node run.mjs --cell chaos         # stability: gw SIGKILL mid-stream/mid-tool, SIGSTOP 30s, resize storm, PTY EOF — 5 scenarios × {ink, otui-capped}
+node run.mjs --cell pipeline      # total-pipeline CPU: UI inside a DEDICATED tmux server (the user's real emulator leg), /proc utime+stime for UI + gateway + tmux @1Hz
+node run.mjs --cell echo          # M7 input latency: 30 keystrokes → first echoed paint (p50/p95/p99) + one \r submit → first-token-paint
 node render.mjs                   # report.html + report-assets/*.png
 ```
 
-### Chaos cell notes
+### Chaos / pipeline / echo cell notes
 
 - **chaos** (5 scenarios × ink/otui-capped, one JSON each, `summary.chaos`):
   gateway death is SELF-inflicted (`HERMES_FAKE_DIE_AT=<msg>:<kill|tool-kill>`
@@ -51,6 +54,27 @@ node render.mjs                   # report.html + report-assets/*.png
   screen still shows a recent pre-kill turn (`const xN` fixture markers).
   `summary.result` keeps its usual semantics — for pty-eof the UI *should*
   die, so read `summary.chaos`, not `summary.result`, for the verdicts.
+- **pipeline**: the ONLY cell that uses tmux — deliberately. The user's real
+  stack runs the TUI inside tmux (verified via /proc environ), so a dedicated
+  `tmux -L hermes-bench-<runId> -f /dev/null` server is the locally measurable
+  terminal-emulator leg. The harness PTY attaches a client (unattached tmux
+  skips most output work; `data_flowing` asserts bytes actually arrived) and
+  samples /proc utime+stime at 1Hz for UI, fake gateway, and the tmux server
+  (`summary.pipeline.cpu_s`). Only that socket's server is killed at the end.
+  Note tmux re-encodes the UI's output for the outer client, so `pty_bytes_total`
+  here is the post-tmux byte count, not the UI's raw output.
+- **frame pacing (M6)**: cpu-paced and pipeline record every PTY chunk
+  timestamp+size; bursts separated by >4ms gaps are frames →
+  `summary.frame_pacing` (fps, interframe p50/p95, bytes/frame p50/p95,
+  coalesced count). Scroll runs record the wheel phase only. There is no
+  env-gated renderer frame counter in ui-opentui to use as ground truth —
+  @opentui/core keeps `renderStats.fps` internally but nothing exports it;
+  wiring it would need a ui-source patch (out of scope here).
+- **echo (M7)**: keystroke chars avoid `u`/`p`/`s`/digits (the OpenTUI status
+  clock repaints `up: Ns` at 1Hz) and matching runs on ANSI-stripped output
+  (raw chunks are full of CSI final letters). The submit leg works because the
+  fake gateway answers `prompt.submit` with a tiny streamed reply carrying the
+  marker token `zqxjv` when `HERMES_FAKE_SUBMIT_RESPONSE=1`.
 
 Configs: `ink` · `otui-capped` (`HERMES_TUI_MAX_MESSAGES=3000`, the default) ·
 `otui-uncapped` (`=100000`). Launch parity with `hermes_cli/main.py`:

@@ -30,6 +30,8 @@
 //                              process can't stop itself usefully).
 //   HERMES_FAKE_DIE_FLAG       die-once flag file: created just before the self-kill so
 //                              the UI's auto-heal RESPAWN (same env) does not die again
+//   HERMES_FAKE_SUBMIT_RESPONSE  "1" → answer prompt.submit with a tiny streamed reply
+//                              carrying the marker token "zqxjv" (echo-latency cells)
 //
 // Modes: burst = write as fast as the pipe accepts (await 'drain' on
 // backpressure, so emission tracks UI ingestion within the ~64KB pipe buffer);
@@ -48,6 +50,7 @@ const SAMPLE_EVERY = Math.max(1, Number.parseInt(process.env.HERMES_FAKE_SAMPLE_
 const PROGRESS = process.env.HERMES_FAKE_PROGRESS || ''
 const PIDFILE = process.env.HERMES_FAKE_PIDFILE || ''
 const DIE_FLAG = process.env.HERMES_FAKE_DIE_FLAG || ''
+const SUBMIT_RESPONSE = process.env.HERMES_FAKE_SUBMIT_RESPONSE === '1'
 
 // Chaos self-termination (deterministic, no external kill races). Die-once:
 // if the flag file exists a previous instance already died here — this is the
@@ -218,6 +221,16 @@ rl.on('line', line => {
     setTimeout(() => {
       streamFixture().catch(() => process.exit(1))
     }, START_DELAY_MS)
+  }
+  // Echo cells: a real (tiny) reply to prompt.submit so input→first-token-paint
+  // is measurable. The marker token "zqxjv" never occurs in the lorem fixture.
+  if (method === 'prompt.submit' && SUBMIT_RESPONSE) {
+    setTimeout(() => {
+      progress({ k: 'submit_response' })
+      void emitEvent({ type: 'message.start' })
+      void emitEvent({ type: 'message.delta', payload: { text: 'Echo probe reply zqxjv — bench token-paint marker.' } })
+      void emitEvent({ type: 'message.complete' })
+    }, 30)
   }
 })
 rl.on('close', () => {

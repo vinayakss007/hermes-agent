@@ -2,7 +2,9 @@
 // 120×40 with the fake gateway substituted via HERMES_PYTHON, drains the master
 // side tightly, samples /proc/PID externally on fixture-message boundaries, and
 // (optionally) wraps the UI in a cgroup-v2 scope via systemd-run.
-// Methodology: docs/plans/opentui-bench-suite.md. No tmux anywhere.
+// Methodology: docs/plans/opentui-bench-suite.md. No tmux anywhere — except
+// mode 'pipeline', which exists to measure the tmux emulator leg and runs the
+// UI inside a dedicated `tmux -L hermes-bench-<runId>` server.
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -118,6 +120,74 @@ function pidAlive(pid) {
   return procStateOf(pid) !== 'Z'
 }
 
+// Cumulative CPU (utime+stime ticks) of one pid — total since its exec.
+function cpuTicksOf(pid) {
+  if (!pid) return null
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return Number(afterComm[11]) + Number(afterComm[12])
+  } catch {
+    return null
+  }
+}
+
+let _clkTck = null
+function clkTck() {
+  if (_clkTck) return _clkTck
+  try {
+    _clkTck = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()) || 100
+  } catch {
+    _clkTck = 100
+  }
+  return _clkTck
+}
+
+function quantile(values, q) {
+  if (!values || values.length === 0) return null
+  const s = [...values].sort((a, b) => a - b)
+  const i = (s.length - 1) * q
+  const lo = Math.floor(i)
+  const hi = Math.ceil(i)
+  return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (i - lo)
+}
+
+// ── M6 frame pacing ─────────────────────────────────────────────────────
+// Burst-segment the PTY data-chunk timestamps: a gap >gapMs is a frame
+// boundary (terminal writers flush a frame as one tight burst of chunks).
+// Returns frames/s, bytes-per-frame distribution, and how many frames
+// coalesced >1 chunk.
+export function framePacing(timestamps, sizes, gapMs = 4) {
+  if (!timestamps || timestamps.length < 2) return null
+  const frames = []
+  let cur = null
+  for (let i = 0; i < timestamps.length; i++) {
+    const t = timestamps[i]
+    if (!cur || t - cur.end > gapMs) {
+      cur = { start: t, end: t, bytes: 0, chunks: 0 }
+      frames.push(cur)
+    }
+    cur.end = t
+    cur.bytes += sizes[i] ?? 0
+    cur.chunks += 1
+  }
+  const spanMs = timestamps[timestamps.length - 1] - timestamps[0]
+  const bytes = frames.map(f => f.bytes)
+  const intervals = frames.slice(1).map((f, i) => f.start - frames[i].start)
+  return {
+    gap_ms: gapMs,
+    chunks: timestamps.length,
+    frames: frames.length,
+    duration_ms: spanMs,
+    fps_avg: spanMs > 0 ? Math.round((frames.length / (spanMs / 1000)) * 10) / 10 : null,
+    interframe_ms_p50: quantile(intervals, 0.5),
+    interframe_ms_p95: quantile(intervals, 0.95),
+    bytes_per_frame_p50: quantile(bytes, 0.5),
+    bytes_per_frame_p95: quantile(bytes, 0.95),
+    coalesced_frames: frames.filter(f => f.chunks > 1).length
+  }
+}
+
 // ── ANSI strip for the determinism digest ──────────────────────────────
 // Removes CSI/OSC/DCS/SOS/PM/APC sequences, single ESC sequences, and control
 // chars, then normalizes whitespace. Good enough to compare final rendered
@@ -186,7 +256,7 @@ function uiArgv(ui) {
  *   ui: 'ink' | 'opentui'
  *   configName: 'ink' | 'otui-capped' | 'otui-uncapped'
  *   opentuiCap: number|null            (HERMES_TUI_MAX_MESSAGES)
- *   mode: 'mem' | 'cpu-paced' | 'scroll' | 'startup' | 'digest' | 'chaos'
+ *   mode: 'mem' | 'cpu-paced' | 'scroll' | 'startup' | 'digest' | 'chaos' | 'pipeline' | 'echo'
  *   chaos: { scenario, dieAt?, stopAt?, flaps?, fakeMode? }   (chaos mode)
  *     scenario: 'gw-kill-stream' | 'gw-kill-tool' | 'gw-stop' | 'resize-storm' | 'pty-eof'
  *   fixturePath, fixtureMsgs, fixtureSha
@@ -229,9 +299,9 @@ export async function runScenario(opts) {
   const fakeEnv = {
     HERMES_FAKE_FIXTURE: fixturePath,
     HERMES_FAKE_MODE:
-      mode === 'cpu-paced'
+      mode === 'cpu-paced' || mode === 'pipeline'
         ? 'paced'
-        : mode === 'scroll'
+        : mode === 'scroll' || mode === 'echo'
           ? 'load-then-idle'
           : mode === 'chaos'
             ? (chaosSpec.fakeMode ?? 'burst')
@@ -244,12 +314,13 @@ export async function runScenario(opts) {
   // Gateway pid discovery (the UI spawns the gateway, env flows through): the
   // fake gateway writes its pid here at startup; an auto-heal respawn REWRITES
   // it — that rewrite is the respawn-detection signal in chaos cells.
-  const gwPidFile = mode === 'chaos' ? join(tmpdir(), `hermes-bench-gwpid-${runId}`) : null
+  const gwPidFile = mode === 'chaos' || mode === 'pipeline' ? join(tmpdir(), `hermes-bench-gwpid-${runId}`) : null
   if (gwPidFile) fakeEnv.HERMES_FAKE_PIDFILE = gwPidFile
   if (chaosSpec?.dieAt) {
     fakeEnv.HERMES_FAKE_DIE_AT = chaosSpec.dieAt
     fakeEnv.HERMES_FAKE_DIE_FLAG = `${gwPidFile}.dieflag`
   }
+  if (mode === 'echo') fakeEnv.HERMES_FAKE_SUBMIT_RESPONSE = '1'
   const env = composeEnv({ ui, opentuiCap, heapMb, fakeEnv, activeSessionFile })
   const { file, args, cwd } = uiArgv(ui)
 
@@ -291,6 +362,28 @@ export async function runScenario(opts) {
     ]
   }
 
+  // ── pipeline mode: wrap the UI in a DEDICATED tmux server ──────────────
+  // The user's real stack runs the TUI inside tmux (verified via /proc
+  // environ), so tmux IS the locally measurable terminal-emulator leg. The UI
+  // command (systemd-run scope and all) runs inside a fresh `tmux -L <sock>`
+  // server; the harness PTY then attaches a client to that socket — without an
+  // attached client tmux skips most output work, so the attach is mandatory
+  // for the numbers to mean anything. Only THIS socket's server is ever
+  // killed; the user's default tmux server is never touched.
+  let tmuxSock = null
+  let tmuxServerPid = null
+  if (mode === 'pipeline') {
+    tmuxSock = `hermes-bench-${runId}`
+    const quotedCmd = [spawnFile, ...spawnArgs].map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')
+    execFileSync(
+      'tmux',
+      ['-L', tmuxSock, '-f', '/dev/null', 'new-session', '-d', '-s', 'sut', '-x', '120', '-y', '40', `exec ${quotedCmd}`],
+      { env }
+    )
+    spawnFile = 'tmux'
+    spawnArgs = ['-L', tmuxSock, '-f', '/dev/null', 'attach-session', '-t', 'sut']
+  }
+
   const t0 = now()
   const term = pty.spawn(spawnFile, spawnArgs, {
     name: 'xterm-256color',
@@ -306,18 +399,25 @@ export async function runScenario(opts) {
   let dataWrites = 0
   let firstByteAt = null
   let lastDataAt = null
-  const dataTimestamps = [] // for scroll latency (epoch ms of each data chunk)
-  let recordDataTimestamps = false
+  const dataTimestamps = [] // scroll latency + frame pacing (epoch ms of each data chunk)
+  const dataSizes = [] // bytes per chunk, aligned with dataTimestamps
+  // cpu-paced/pipeline record the whole stream (M6 frame pacing); scroll keeps
+  // its wheel-phase-only recording so the pacing stats reflect the scroll leg.
+  let recordDataTimestamps = mode === 'cpu-paced' || mode === 'pipeline'
   let tailBuf = []
   let tailLen = 0
   const TAIL_MAX = 4 * 1024 * 1024
   term.onData(d => {
     const t = now()
-    bytesOut += Buffer.byteLength(d)
+    const blen = Buffer.byteLength(d)
+    bytesOut += blen
     dataWrites++
     if (firstByteAt === null) firstByteAt = t
     lastDataAt = t
-    if (recordDataTimestamps) dataTimestamps.push(t)
+    if (recordDataTimestamps) {
+      dataTimestamps.push(t)
+      dataSizes.push(blen)
+    }
     tailBuf.push(d)
     tailLen += d.length
     while (tailLen > TAIL_MAX && tailBuf.length > 1) tailLen -= tailBuf.shift().length
@@ -357,7 +457,41 @@ export async function runScenario(opts) {
   let uiPid = term.pid
   // Node 26 names its main thread: comm is 'node-MainThread'.
   const isNodeComm = pid => commOf(pid).startsWith('node')
-  if (memoryMax || opts.inkNodeSampler) {
+  if (mode === 'pipeline') {
+    // term.pid is the tmux CLIENT — the UI lives under the dedicated server's
+    // pane. Resolve server pid + pane pid, then wait for the pane command
+    // (sh `exec` → systemd-run exec-in-place) to flip comm to node.
+    uiPid = null
+    let panePid = null
+    for (let i = 0; i < 200 && !exited; i++) {
+      try {
+        const out = execFileSync(
+          'tmux',
+          ['-L', tmuxSock, 'display-message', '-p', '-t', 'sut', '#{pid} #{pane_pid}'],
+          { encoding: 'utf8', env }
+        ).trim()
+        const [srv, pane] = out.split(/\s+/).map(Number)
+        if (srv) tmuxServerPid = srv
+        if (pane) panePid = pane
+      } catch {
+        /* server still starting */
+      }
+      if (panePid) break
+      await sleep(25)
+    }
+    for (let i = 0; i < 200 && !exited && panePid; i++) {
+      if (isNodeComm(panePid)) {
+        uiPid = panePid
+        break
+      }
+      const nodeKid = childrenOf(panePid).find(k => isNodeComm(k))
+      if (nodeKid) {
+        uiPid = nodeKid
+        break
+      }
+      await sleep(25)
+    }
+  } else if (memoryMax || opts.inkNodeSampler) {
     uiPid = null
     for (let i = 0; i < 200 && !exited; i++) {
       if (isNodeComm(term.pid)) {
@@ -388,6 +522,7 @@ export async function runScenario(opts) {
   let lastBoundaryMsgs = 0
   let streamStarts = 0
   let dyingItem = null // {k:'dying', kind, msgs, wall} from the fake gateway's last gasp
+  const cpuSeries = [] // pipeline: 1Hz {t_ms, ui, gw, tmux} cumulative ticks
 
   // Gateway pid tracking via the pidfile (chaos/pipeline). A respawned
   // gateway rewrites the file → a new entry appears here.
@@ -497,6 +632,14 @@ export async function runScenario(opts) {
       if (t - lastPeriodic >= 1000) {
         lastPeriodic = t
         takeSample('periodic', doneInfo?.msgs ?? null, null)
+        if (mode === 'pipeline') {
+          cpuSeries.push({
+            t_ms: t - t0,
+            ui: cpuTicksOf(uiPid),
+            gw: cpuTicksOf(gwPidHistory[gwPidHistory.length - 1]?.pid ?? gwPid),
+            tmux: cpuTicksOf(tmuxServerPid)
+          })
+        }
       }
     }, 25)
   }
@@ -845,9 +988,108 @@ export async function runScenario(opts) {
     digest = createHash('sha256').update(digestText).digest('hex')
   }
 
+  // ── M7 input-to-echo latency ────────────────────────────────────────
+  if (mode === 'echo' && !exited && streamDone) {
+    await quiesce(quiesceMs)
+    // 30 distinct printable chars. Excludes u/p/s and digits: the OpenTUI
+    // status bar repaints "up: Ns" at 1Hz and those glyphs would false-match.
+    // Detection runs on ANSI-STRIPPED accumulated output (raw chunks are full
+    // of CSI finals like 'm'/'H' that would match almost any letter).
+    const chars = [...'abcdefghijklmnoqrtvwxyzABCDEFG']
+    const echoLat = []
+    const firstChunkLat = []
+    let capture = null
+    const echoTap = term.onData(d => {
+      if (!capture) return
+      const t = now()
+      if (capture.firstAt === null) capture.firstAt = t
+      if (capture.matchedAt === null) {
+        capture.acc += d
+        if (stripAnsi(capture.acc).includes(capture.needle)) capture.matchedAt = t
+      }
+    })
+    for (const c of chars) {
+      if (exited) break
+      capture = { needle: c, acc: '', matchedAt: null, firstAt: null }
+      const tw = now()
+      term.write(c)
+      await waitFor(() => capture.matchedAt !== null, 440, 5)
+      if (capture.matchedAt !== null) echoLat.push(capture.matchedAt - tw)
+      if (capture.firstAt !== null) firstChunkLat.push(capture.firstAt - tw)
+      const elapsed = now() - tw
+      if (elapsed < 500) await sleep(500 - elapsed)
+    }
+    // Submit: \r → the fake gateway streams a tiny reply carrying "zqxjv";
+    // write→marker-paint = input-to-first-token-paint (incl. the gateway hop).
+    let submitMs = null
+    if (!exited) {
+      capture = { needle: 'zqxjv', acc: '', matchedAt: null, firstAt: null }
+      const ts = now()
+      term.write('\r')
+      await waitFor(() => capture.matchedAt !== null, 8000, 10)
+      if (capture.matchedAt !== null) submitMs = capture.matchedAt - ts
+      await quiesce(500)
+    }
+    capture = null
+    echoTap.dispose()
+    result.echo = {
+      keystrokes_sent: chars.length,
+      keystrokes_matched: echoLat.length,
+      echo_ms: { p50: quantile(echoLat, 0.5), p95: quantile(echoLat, 0.95), p99: quantile(echoLat, 0.99) },
+      first_chunk_ms: { p50: quantile(firstChunkLat, 0.5), p95: quantile(firstChunkLat, 0.95) },
+      submit_first_token_paint_ms: submitMs,
+      latencies_ms: echoLat
+    }
+  }
+
+  // ── total-pipeline CPU (read ticks while everything is still alive) ──
+  if (mode === 'pipeline') {
+    const clk = clkTck()
+    const gwp = gwPidHistory[gwPidHistory.length - 1]?.pid ?? gwPid
+    const lastGood = key => cpuSeries.filter(s => s[key] != null).at(-1)?.[key] ?? null
+    const fin = {
+      ui: cpuTicksOf(uiPid) ?? lastGood('ui'),
+      gw: cpuTicksOf(gwp) ?? lastGood('gw'),
+      tmux: cpuTicksOf(tmuxServerPid) ?? lastGood('tmux')
+    }
+    const toS = v => (v == null ? null : Math.round((v / clk) * 100) / 100)
+    result.pipeline = {
+      tmux_socket: tmuxSock,
+      tmux_server_pid: tmuxServerPid,
+      ui_pid: uiPid,
+      gw_pid: gwp,
+      clk_tck: clk,
+      cpu_s: {
+        ui: toS(fin.ui),
+        gateway: toS(fin.gw),
+        tmux_server: toS(fin.tmux),
+        total: toS((fin.ui ?? 0) + (fin.gw ?? 0) + (fin.tmux ?? 0))
+      },
+      bytes_total: bytesOut,
+      data_flowing: bytesOut > 0, // bytes MUST reach the harness PTY for tmux numbers to mean anything
+      cpu_series: cpuSeries
+    }
+  }
+
+  // M6 frame pacing from the recorded chunk timeline (cpu-paced/pipeline:
+  // whole stream; scroll: wheel phase only).
+  if (dataTimestamps.length > 1) {
+    result.frame_pacing = framePacing(dataTimestamps, dataSizes)
+  }
+
   await gracefulQuit()
   clearInterval(pollTimer)
   clearInterval(lagTimer)
+
+  // pipeline: the dedicated tmux server dies with the run (ONLY this socket's
+  // server — never the user's default tmux server).
+  if (tmuxSock) {
+    try {
+      execFileSync('tmux', ['-L', tmuxSock, 'kill-server'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      /* already gone (normal: the server exits with its last session) */
+    }
+  }
 
   // chaos: orphan sweep — any gateway pid ever recorded (or the UI itself)
   // still alive after teardown is an orphan: record, then reap (specific pids
@@ -960,7 +1202,14 @@ export async function runScenario(opts) {
       opentui_cap: opentuiCap,
       fixture: { path: fixturePath, msgs: fixtureMsgs, sha256: fixtureSha },
       sample_every: sampleEvery,
-      mode_params: mode === 'cpu-paced' ? { rate: pacedRate } : mode === 'scroll' ? scroll : mode === 'chaos' ? chaosSpec : {},
+      mode_params:
+        mode === 'cpu-paced' || mode === 'pipeline'
+          ? { rate: pacedRate }
+          : mode === 'scroll'
+            ? scroll
+            : mode === 'chaos'
+              ? chaosSpec
+              : {},
       ui_pid: uiPid,
       gw_pid: gwPid,
       cgroup: cgPath,

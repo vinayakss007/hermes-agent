@@ -6,7 +6,7 @@
 // bench/results/<utc>-<sha7>-<cell>-<ui>-<config>-r<rep>.json.
 //
 // Usage:
-//   node run.mjs --cell gate|mem3000|slope10k|nodes|cpu|scroll|startup|chaos
+//   node run.mjs --cell gate|mem3000|slope10k|nodes|cpu|scroll|startup|chaos|pipeline|echo
 //   node run.mjs --all            (the full E1 host sequence, gate first)
 // Knobs: --reps N, --msgs N, --cap 2G|none, --seed N
 
@@ -341,6 +341,49 @@ async function cellChaos(opts) {
   }
 }
 
+// ── total-pipeline CPU cell (UI + gateway + tmux emulator leg) ───────────
+// The user's real stack runs the TUI inside tmux; the UI runs in a dedicated
+// `tmux -L hermes-bench-<runId>` server with the harness PTY attached as the
+// client (unattached tmux skips most output work). Results carry
+// summary.pipeline (cpu_s per process) + summary.frame_pacing (M6).
+async function cellPipeline(opts) {
+  const msgs = opts.msgs ?? 800
+  const fx = await ensureFixture(msgs)
+  for (const config of opts.configs ?? ['ink', 'otui-capped']) {
+    await doRun('pipeline', config, 0, {
+      mode: 'pipeline',
+      pacedRate: 30,
+      fixturePath: fx.path,
+      fixtureMsgs: fx.msgs,
+      fixtureSha: fx.sha256,
+      memoryMax: '2G',
+      heapMb: 8192,
+      runTimeoutMs: 30 * 60 * 1000
+    })
+  }
+}
+
+// ── M7 input-to-echo latency cell ────────────────────────────────────────
+// Load 100 msgs, idle, then 30 distinct keystrokes 500ms apart; latency =
+// write → first PTY data whose ANSI-stripped text contains that char. Then
+// one \r submit timed to the fake gateway's marker-token paint. Results
+// carry summary.echo.
+async function cellEcho(opts) {
+  const msgs = opts.msgs ?? 100
+  const fx = await ensureFixture(msgs)
+  for (const config of opts.configs ?? ['ink', 'otui-capped']) {
+    await doRun('echo', config, 0, {
+      mode: 'echo',
+      fixturePath: fx.path,
+      fixtureMsgs: fx.msgs,
+      fixtureSha: fx.sha256,
+      memoryMax: '2G',
+      heapMb: 8192,
+      runTimeoutMs: 10 * 60 * 1000
+    })
+  }
+}
+
 async function cellStartup(opts) {
   const reps = opts.reps ?? 10
   const rand = rng(opts.seed ?? 4242)
@@ -386,7 +429,9 @@ const CELLS = {
   cpu: cellCpu,
   scroll: cellScroll,
   startup: cellStartup,
-  chaos: cellChaos
+  chaos: cellChaos,
+  pipeline: cellPipeline,
+  echo: cellEcho
 }
 
 if (args.includes('--all')) {
