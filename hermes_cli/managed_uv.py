@@ -276,8 +276,8 @@ def get_pip_cmd() -> list[str]:
     raise RuntimeError(
         "uv is not installed or not found in PATH. "
         "Hermes strictly requires uv for dependency management. "
-        "Please install uv (e.g., via the Hermes installer, `pkg install uv` on Termux, "
-        "or https://docs.astral.sh/uv/getting-started/installation/) and try again."
+        "Please run `hermes doctor` to diagnose and fix your environment, "
+        "or install uv manually (e.g., `pkg install uv` on Termux, or via the Hermes installer)."
     )
 
 
@@ -347,6 +347,76 @@ def pip_install(
             stdout="",
             stderr=str(e),
         )
+
+
+def recreate_venv_atomically(project_root: Path, group: str = "all") -> bool:
+    """Atomically recreate the venv to ensure a clean, uv-native state.
+    
+    This is the safest way to migrate from a legacy pip-created venv or 
+    repair a corrupted venv. It builds a fresh `venv.new`, installs dependencies,
+    and then atomically swaps `venv` -> `venv.bak` and `venv.new` -> `venv`.
+    
+    This guarantees we never accidentally strip dependencies or leave legacy 
+    pip cruft behind, as we are building a pristine environment from scratch.
+    
+    Returns True on success, False on failure.
+    """
+    target_venv = project_root / "venv"
+    new_venv = project_root / "venv.new"
+    backup_venv = project_root / "venv.bak"
+    
+    uv_bin = resolve_uv() or shutil.which("uv")
+    if not uv_bin:
+        logger.error("Cannot recreate venv: uv is not installed or found in PATH.")
+        return False
+        
+    print(f"  → Creating fresh venv at {new_venv}...")
+    # 1. Create fresh venv
+    res = subprocess.run(
+        [uv_bin, "venv", str(new_venv)],
+        capture_output=True, text=True, timeout=120
+    )
+    if res.returncode != 0:
+        logger.error("Failed to create new venv: %s", res.stderr)
+        return False
+        
+    print(f"  → Installing dependencies into new venv ({group})...")
+    # 2. Install dependencies into the new venv
+    env = {**os.environ, "VIRTUAL_ENV": str(new_venv)}
+    env["PATH"] = f"{new_venv / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    
+    res = subprocess.run(
+        [uv_bin, "pip", "install", "-e", f".[{group}]"],
+        cwd=project_root,
+        capture_output=True, text=True, timeout=600,
+        env=env, stdin=subprocess.DEVNULL
+    )
+    if res.returncode != 0:
+        logger.error("Failed to install dependencies in new venv: %s", res.stderr)
+        # Clean up failed new venv
+        shutil.rmtree(new_venv, ignore_errors=True)
+        return False
+        
+    print("  -> Dependencies installed successfully. Performing atomic swap...")
+    # 3. Atomic swap
+    try:
+        if target_venv.exists():
+            if backup_venv.exists():
+                shutil.rmtree(backup_venv, ignore_errors=True)
+            target_venv.rename(backup_venv)
+            
+        new_venv.rename(target_venv)
+        print("  OK Venv successfully recreated and swapped.")
+        print("  -> (Old venv backed up to venv.bak. You can safely delete it if everything works.)")
+        return True
+    except Exception as e:
+        logger.error("Failed to atomically swap venvs: %s", e)
+        # Attempt to restore if swap failed mid-way
+        if not target_venv.exists() and backup_venv.exists():
+            backup_venv.rename(target_venv)
+        return False
 
 
 def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> bool:

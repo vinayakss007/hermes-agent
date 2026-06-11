@@ -578,6 +578,28 @@ def run_doctor(args):
     # (a git conflict resolution can silently revert one but not the other).
     _check_version_consistency(issues)
     
+    _section("Virtual Environment Integrity")
+    venv_path = PROJECT_ROOT / "venv"
+    if not venv_path.exists():
+        check_warn("Venv directory missing", "(will be recreated on next install/update)")
+    else:
+        # Check for legacy pip markers or missing uv
+        has_uv = bool(resolve_uv() or shutil.which("uv"))
+        if not has_uv:
+            check_fail(
+                "Legacy pip venv detected (uv missing)", 
+                "(dependency management will fail. Run `hermes doctor --fix` to recreate)"
+            )
+            if should_fix:
+                print("  -> Attempting atomic venv recreation...")
+                from hermes_cli.managed_uv import recreate_venv_atomically
+                if recreate_venv_atomically(PROJECT_ROOT, group="all"):
+                    check_ok("Venv successfully recreated and swapped to uv-native state")
+                else:
+                    check_fail("Venv recreation failed", "Please run the Hermes installer")
+        else:
+            check_ok("Venv structure valid and uv-native")
+    
     _section("Dependency Management")
     uv_bin = resolve_uv()
     if uv_bin:
