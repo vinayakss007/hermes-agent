@@ -7658,7 +7658,7 @@ def step_up_nous_billing_scope(
     ``403 insufficient_scope``. Runs a fresh device-connect with
     ``inference:invoke tool:invoke billing:manage`` on the scope. The user must be
     an ADMIN/OWNER and tick "Allow terminal billing" in the portal for the minted
-    token to actually carry the scope; otherwise NAS silently downscopes and this
+    token to actually carry the scope; otherwise the server silently downscopes and this
     returns False.
 
     Reuses the held credential's portal/inference URLs + client_id so the step-up
