@@ -36,6 +36,7 @@ import { makeAppLayer } from '../boundary/runtime.ts'
 import { nthAssistantResponse } from '../logic/copy.ts'
 import { envFlag, launchCwd } from '../logic/env.ts'
 import { createPromptHistory, dirHistoryPersister, loadDirHistory } from '../logic/history.ts'
+import { parseProcessList } from '../logic/backgroundActivity.ts'
 import { createPasteStore } from '../logic/pastes.ts'
 import { mapResumeHistory } from '../logic/resume.ts'
 import {
@@ -484,6 +485,14 @@ export const run = Effect.fn('Tui.run')(function* (input: TuiInput) {
           Effect.runPromise(gateway.request('session.title', { session_id: sessionId, title })).then(() => undefined)
       }
 
+      // The background-process panel's gateway calls (view/overlays/backgroundPanel.tsx):
+      // `agents.list` lists the OS process registry; `process.stop` kills ALL of them
+      // (the gateway exposes kill-all only — no per-process RPC, hence no per-row kill).
+      const backgroundOps = {
+        list: () => Effect.runPromise(gateway.request('agents.list', {})).then(parseProcessList),
+        stopAll: () => Effect.runPromise(gateway.request('process.stop', {})).then(() => undefined)
+      }
+
       // Boot-picker Esc fallback: the picker closed without a pick and no
       // session exists yet (bare `--resume` launch) — create a fresh one so
       // the composer has somewhere to send prompts.
@@ -528,6 +537,7 @@ export const run = Effect.fn('Tui.run')(function* (input: TuiInput) {
             .tail(200)
             .map(e => `${e.scope}: ${e.msg}`),
         openDashboard: () => store.openDashboard(),
+        openBackgroundPanel: () => store.openBackgroundPanel(),
         openPager: (title, text) => store.openPager(title, text),
         openPicker: picker => store.openPicker(picker),
         openSessionPicker: tab => store.openSessionPicker(tab),
@@ -584,6 +594,24 @@ export const run = Effect.fn('Tui.run')(function* (input: TuiInput) {
       // Live backend: drive a session (create + optional initial prompt) concurrently.
       if (!input.fake) yield* Effect.forkScoped(bootstrapSession(gateway, store, input))
 
+      // Ambient `bg:` badge (A): poll the OS-process registry on a slow interval so
+      // the status bar reflects running background processes even with the panel
+      // closed. Cheap local RPC; scoped fiber → auto-cancelled on shutdown.
+      if (!input.fake)
+        yield* Effect.forkScoped(
+          Effect.gen(function* () {
+            while (true) {
+              yield* Effect.sleep('8 seconds')
+              yield* Effect.promise(() =>
+                backgroundOps
+                  .list()
+                  .then(procs => store.setBackgroundProcesses(procs))
+                  .catch(() => {})
+              )
+            }
+          })
+        )
+
       // Contact point #1: the single render bridge. After this, the screen is Solid's.
       // The theme is sourced reactively from the store (skin events update it).
       yield* Effect.promise(() =>
@@ -604,6 +632,7 @@ export const run = Effect.fn('Tui.run')(function* (input: TuiInput) {
                   history={history}
                   onImagePaste={onImagePaste}
                   pasteStore={pasteStore}
+                  backgroundOps={backgroundOps}
                 />
               </ThemeProvider>
             </KeymapProvider>

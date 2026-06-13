@@ -20,12 +20,14 @@ import { deferClose } from '../logic/defer.ts'
 import type { PromptHistory as ComposerHistory } from '../logic/history.ts'
 import type { PasteStore } from '../logic/pastes.ts'
 import { actionCommand, promptHistoryEntries } from '../logic/promptHistory.ts'
+import type { BackgroundProcess } from '../logic/backgroundActivity.ts'
 import type { SessionStore } from '../logic/store.ts'
 import { AgentsTray, type AgentsTrayApi } from './agentsTray.tsx'
 import { Composer } from './composer.tsx'
 import { DimensionsProvider } from './dimensions.tsx'
 import { Header } from './header.tsx'
 import { AgentsDashboard } from './overlays/agentsDashboard.tsx'
+import { BackgroundPanel } from './overlays/backgroundPanel.tsx'
 import { Pager } from './overlays/pager.tsx'
 import { Picker } from './overlays/picker.tsx'
 import { PromptHistory } from './overlays/promptHistory.tsx'
@@ -52,6 +54,11 @@ export interface AppProps {
   readonly history?: ComposerHistory
   readonly onImagePaste?: () => void
   readonly pasteStore?: PasteStore
+  /** Gateway calls for the background-process panel (agents.list + process.stop). */
+  readonly backgroundOps?: {
+    list: () => Promise<BackgroundProcess[]>
+    stopAll: () => Promise<void>
+  }
 }
 
 const NOOP = () => {}
@@ -75,6 +82,7 @@ export function App(props: AppProps) {
   const blocked = () => props.store.state.prompt !== undefined
   const pager = () => props.store.state.pager
   const dashboard = () => props.store.state.dashboard
+  const backgroundPanel = () => props.store.state.backgroundPanel
   const sessionPicker = () => props.store.state.sessionPicker
   const picker = () => props.store.state.picker
   const promptHistory = () => props.store.state.promptHistory
@@ -82,6 +90,14 @@ export function App(props: AppProps) {
   // the freshly-remounted composer (see deferClose).
   const closePager = () => deferClose(() => props.store.closePager())
   const closeDashboard = () => deferClose(() => props.store.closeDashboard())
+  const closeBackgroundPanel = () => deferClose(() => props.store.closeBackgroundPanel())
+  // Fetch the current OS-process snapshot into the store (panel refresh + the bg badge).
+  const refreshBackground = () => {
+    void props.backgroundOps
+      ?.list()
+      .then(procs => props.store.setBackgroundProcesses(procs))
+      .catch(() => {})
+  }
   // close WITHOUT a pick — the boot path may create a fresh session here.
   const closeSessionPicker = () =>
     deferClose(() => {
@@ -202,6 +218,19 @@ export function App(props: AppProps) {
                 subagents={props.store.state.subagents}
                 onClose={closeDashboard}
                 preselect={props.store.state.dashboardAgent}
+              />
+            </Match>
+            <Match when={backgroundPanel()}>
+              <BackgroundPanel
+                processes={props.store.state.backgroundProcesses}
+                onRefresh={refreshBackground}
+                onStopAll={() => {
+                  void props.backgroundOps
+                    ?.stopAll()
+                    .then(refreshBackground)
+                    .catch(() => {})
+                }}
+                onClose={closeBackgroundPanel}
               />
             </Match>
           </Switch>

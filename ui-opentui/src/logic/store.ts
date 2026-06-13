@@ -26,7 +26,7 @@ import { diffStats, type DiffStats } from './diff.ts'
 import type { SessionTabId } from './sessionPicker.ts'
 import { envFlag, envOutputUnlimited } from './env.ts'
 import { registerNotifier } from './notify.ts'
-import { parseNotification, type ActivityNotification } from './backgroundActivity.ts'
+import { parseNotification, type ActivityNotification, type BackgroundProcess } from './backgroundActivity.ts'
 import { stripAnsi, stripOmittedNote, stripToolEnvelope } from './toolOutput.ts'
 import { DEFAULT_THEME, type Theme, themeFromSkin } from './theme.ts'
 
@@ -257,6 +257,10 @@ export interface StoreState {
   dashboard: boolean
   /** Subagent id the dashboard should preselect on open (tray Enter — Epic 2.7). */
   dashboardAgent: string | undefined
+  /** Whether the background-process panel overlay is open (/bg). */
+  backgroundPanel: boolean
+  /** OS background processes (polled from `agents.list`) — the panel + the `bg:` badge. */
+  backgroundProcesses: BackgroundProcess[]
   /** Transient busy indicator (the kaomoji face/verb from `thinking.delta`/`status.update`);
    *  shown above the composer WHILE a turn runs, cleared on `message.complete`. NOT transcript. */
   status: string | undefined
@@ -468,6 +472,8 @@ export function createSessionStore(options?: SessionStoreOptions) {
     subagents: [],
     dashboard: false,
     dashboardAgent: undefined,
+    backgroundPanel: false,
+    backgroundProcesses: [],
     lastNotification: undefined,
     status: undefined,
     // startedAt is set ONCE here (store creation ≈ session start) — the status
@@ -635,6 +641,17 @@ export function createSessionStore(options?: SessionStoreOptions) {
   function closeDashboard() {
     setState('dashboard', false)
     setState('dashboardAgent', undefined)
+  }
+
+  function openBackgroundPanel() {
+    setState('backgroundPanel', true)
+  }
+  function closeBackgroundPanel() {
+    setState('backgroundPanel', false)
+  }
+  /** Replace the polled OS-process snapshot (drives the panel + the `bg:` badge). */
+  function setBackgroundProcesses(procs: BackgroundProcess[]) {
+    setState('backgroundProcesses', procs)
   }
 
   /** Open a local Y/N confirm dialog (non-gateway; e.g. /clear). */
@@ -1122,6 +1139,9 @@ export function createSessionStore(options?: SessionStoreOptions) {
     setDetails,
     openDashboard,
     closeDashboard,
+    openBackgroundPanel,
+    closeBackgroundPanel,
+    setBackgroundProcesses,
     hydrate,
     beginBuffer,
     commitSnapshot,

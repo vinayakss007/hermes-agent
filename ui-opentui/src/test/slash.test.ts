@@ -226,6 +226,7 @@ function makeCtx(request: (method: string, params: Record<string, unknown>) => P
     modelItems: () => modelCache.value,
     setModelItems: items => (modelCache.value = items),
     openDashboard: () => (dashboard.value = true),
+    openBackgroundPanel: () => {},
     openPager: (title, text) => paged.push({ text, title }),
     openPicker: p => pickers.push(p),
     openSessionPicker: tab => sessionPickers.push(tab),

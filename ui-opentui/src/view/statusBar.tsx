@@ -41,6 +41,7 @@
 import { useKeyboard } from '@opentui/solid'
 import { createEffect, createMemo, createSignal, onCleanup, Show } from 'solid-js'
 
+import { runningCount } from '../logic/backgroundActivity.ts'
 import type { SessionStore } from '../logic/store.ts'
 import { useDimensions } from './dimensions.tsx'
 import { elapsedSeconds, useElapsedTick } from './elapsed.ts'
@@ -258,6 +259,12 @@ export function StatusBar(props: { store: SessionStore }) {
     const n = info().mcpServers ?? 0
     return segs().mcp && n > 0 ? `mcp: ${n}` : ''
   })
+  // `bg: N` — running OS background processes (polled into the store); the
+  // ambient half of the background-activity notifications (glitch 2026-06-13).
+  const bgText = createMemo(() => {
+    const n = runningCount([], props.store.state.backgroundProcesses)
+    return segs().bg && n > 0 ? `bg: ${n}` : ''
+  })
 
   // The cwd flows LAST on the same line (not right-pinned): its budget is the
   // row width minus every segment before it; it tail-truncates into that, and
@@ -265,7 +272,7 @@ export function StatusBar(props: { store: SessionStore }) {
   const leftLen = createMemo(() => {
     let len = 1 // dot
     if (model()) len += 1 + model().length + effort().length
-    for (const seg of [ctxText(), costText(), upText(), cmpText(), profileText(), mcpText()]) {
+    for (const seg of [ctxText(), costText(), upText(), cmpText(), profileText(), bgText(), mcpText()]) {
       if (seg) len += SEP.length + seg.length
     }
     return len
@@ -340,7 +347,7 @@ export function StatusBar(props: { store: SessionStore }) {
           {/* statusFg, not accent — persistent chrome spends no warm ink
               (design pass); the navy fill is the bar's one blue surface. */}
           <Seg text={profileText()} fg={theme().color.statusFg} />
-          {/* `bg: N` would slot here (segs().bg) — no store data feeds it yet (see header). */}
+          <Seg text={bgText()} fg={theme().color.statusWarn} />
           <Seg text={mcpText()} />
         </text>
         {/* the cwd is RIGHT-PINNED (F10): a flex spacer eats the slack so the

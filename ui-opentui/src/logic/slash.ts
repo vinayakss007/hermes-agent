@@ -73,6 +73,8 @@ export interface SlashContext {
   readonly openPicker: (picker: PickerState) => void
   /** Open the agents dashboard (/agents, /tasks). */
   readonly openDashboard: () => void
+  /** Open the background-process panel (/bg). */
+  readonly openBackgroundPanel: () => void
   /** Cached `/model` picker rows (Epic 7 instant open); undefined until prefetched. */
   readonly modelItems: () => PickerItem[] | undefined
   /** Update the cached `/model` picker rows. */
@@ -210,6 +212,7 @@ const CLIENT_HELP_LINES = [
   '/clear, /new — clear the transcript (confirm)',
   '/compact [on|off|toggle] — compact transcript spacing',
   '/details [hidden|collapsed|expanded|cycle] — tool/reasoning detail',
+  '/bg — background processes (list + stop all)',
   '/replay [n|path] — inspect an archived spawn tree',
   '/mem — live memory stats (diag)',
   '/heapdump — write a V8 heap snapshot (diag)',
@@ -663,6 +666,8 @@ const toolsCmd: ClientHandler = async (arg, ctx) => {
 /** The TUI-only client commands (run in-process, never hit the gateway). */
 const CLIENT: Record<string, ClientHandler> = {
   agents: (_arg, ctx) => ctx.openDashboard(),
+  background: (_arg, ctx) => ctx.openBackgroundPanel(),
+  bg: (_arg, ctx) => ctx.openBackgroundPanel(),
   clear: (_arg, ctx) => ctx.confirm('Clear the transcript?', ctx.clearTranscript),
   compact: compactCmd,
   copy: (arg, ctx) => {
@@ -673,6 +678,7 @@ const CLIENT: Record<string, ClientHandler> = {
   details: detailsCmd,
   exit: (_arg, ctx) => ctx.quit(),
   heapdump: heapdumpCmd,
+  jobs: (_arg, ctx) => ctx.openBackgroundPanel(),
   mem: memCmd,
   model: modelCmd,
   replay: replayCmd,

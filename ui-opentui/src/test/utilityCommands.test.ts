@@ -69,6 +69,7 @@ function makeCtx(request: (method: string, params: Record<string, unknown>) => P
     modelItems: () => undefined,
     setModelItems: () => {},
     openDashboard: () => {},
+    openBackgroundPanel: () => {},
     openPager: (title, text) => paged.push({ text, title }),
     openPicker: () => {},
     openSessionPicker: () => {},
