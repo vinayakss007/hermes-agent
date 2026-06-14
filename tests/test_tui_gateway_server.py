@@ -7856,3 +7856,51 @@ def test_reap_idle_sessions_closes_only_evictable(monkeypatch):
         assert closed == [("stale", "idle_timeout")]
     finally:
         server._sessions.clear()
+
+
+class TestProcessCompletionCard:
+    """_emit_process_completion_card surfaces a background-process completion to
+    the TUI as a notification.show card (Option B, glitch 2026-06-14) — in
+    addition to the agent turn the completion triggers."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        emitted: list = []
+        monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload)))
+        return emitted
+
+    def test_completion_exit_zero_is_an_info_card(self, monkeypatch):
+        emitted = self._capture(monkeypatch)
+        server._emit_process_completion_card(
+            "s1", {"type": "completion", "session_id": "proc_1", "command": "sleep 20 && echo hi", "exit_code": 0}
+        )
+        assert len(emitted) == 1
+        event, sid, payload = emitted[0]
+        assert event == "notification.show"
+        assert sid == "s1"
+        assert payload["text"] == "sleep 20 && echo hi exited 0"
+        assert payload["level"] == "info"
+        assert payload["kind"] == "process.complete"
+        assert payload["key"] == "proc:proc_1"
+
+    def test_nonzero_exit_is_a_warn_card(self, monkeypatch):
+        emitted = self._capture(monkeypatch)
+        server._emit_process_completion_card("s1", {"type": "completion", "command": "build", "exit_code": 1, "session_id": "p2"})
+        assert emitted[0][2]["level"] == "warn"
+        assert emitted[0][2]["text"] == "build exited 1"
+
+    def test_watch_match_is_not_carded(self, monkeypatch):
+        emitted = self._capture(monkeypatch)
+        server._emit_process_completion_card("s1", {"type": "watch_match", "command": "tail -f log"})
+        assert emitted == []
+
+    def test_long_command_is_truncated(self, monkeypatch):
+        emitted = self._capture(monkeypatch)
+        server._emit_process_completion_card("s1", {"type": "completion", "command": "x" * 100, "exit_code": 0, "session_id": "p3"})
+        assert "…" in emitted[0][2]["text"]
+        assert len(emitted[0][2]["text"]) < 80
+
+    def test_missing_exit_code_says_finished(self, monkeypatch):
+        emitted = self._capture(monkeypatch)
+        server._emit_process_completion_card("s1", {"type": "completion", "command": "daemon", "session_id": "p4"})
+        assert emitted[0][2]["text"] == "daemon finished"

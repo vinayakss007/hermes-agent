@@ -5607,6 +5607,39 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt_sid, evt_type)
 
 
+def _emit_process_completion_card(sid: str, evt: dict) -> None:
+    """Surface a background-process COMPLETION to the TUI as a notification card,
+    in ADDITION to the agent turn it triggers. A bare `notify_on_complete` exit
+    otherwise reaches the TUI only as the agent's narration (the completion is fed
+    to the model as a synthetic prompt, never sent to the UI). Emitting a
+    ``notification.show`` lets the OpenTUI engine render a distinct inline card so
+    the user actually sees the process finish; the Ink engine treats it as a
+    notice. Additive — no existing behaviour changes. Completion events only
+    (watch matches aren't terminal); the dedup at the call sites ensures one card
+    per completion. (glitch 2026-06-14)"""
+    if evt.get("type", "completion") != "completion":
+        return
+    cmd = str(evt.get("command") or "process").strip().replace("\n", " ")
+    if len(cmd) > 60:
+        cmd = cmd[:59] + "…"
+    code = evt.get("exit_code")
+    if code is None:
+        text, level = f"{cmd} finished", "info"
+    else:
+        text = f"{cmd} exited {code}"
+        level = "info" if code == 0 else "warn"
+    _emit(
+        "notification.show",
+        sid,
+        {
+            "text": text,
+            "kind": "process.complete",
+            "level": level,
+            "key": f"proc:{evt.get('session_id', '')}",
+        },
+    )
+
+
 def _notification_poller_loop(
     stop_event: threading.Event, sid: str, session: dict
 ) -> None:
@@ -5665,6 +5698,7 @@ def _notification_poller_loop(
 
         rid = f"__notif__{int(time.time() * 1000)}"
         try:
+            _emit_process_completion_card(sid, evt)
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, text)
         except Exception as exc:
@@ -5708,6 +5742,7 @@ def _notification_poller_loop(
 
         rid = f"__notif__{int(time.time() * 1000)}"
         try:
+            _emit_process_completion_card(sid, evt)
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, text)
         except Exception as exc:
@@ -6148,6 +6183,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         break
                     session["running"] = True
                 try:
+                    _emit_process_completion_card(sid, _evt)
                     _emit("message.start", sid)
                     _run_prompt_submit(rid, sid, session, synth)
                 except Exception as _n_exc:
